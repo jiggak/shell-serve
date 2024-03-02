@@ -1,7 +1,7 @@
 #[macro_use] extern crate rocket;
 
 use rocket::State;
-use shell_serve::{Method, Route, ShellRouter};
+use shell_serve::{route::{Method, Route},router::ShellRouter};
 use std::path::PathBuf;
 
 
@@ -24,7 +24,7 @@ fn _delete(path: PathBuf) {
 #[launch]
 fn rocket() -> _ {
     let router = ShellRouter::new(vec![
-        "GET:/{path}=echo Hello ${path}".parse::<Route>().unwrap()
+        "GET:/{path..}=echo Hello ${path}".parse::<Route>().unwrap()
     ]);
 
     rocket::build()
