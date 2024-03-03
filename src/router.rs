@@ -1,5 +1,5 @@
 use std::path::Path;
-use crate::route::{Method, Route};
+use crate::route::{Method, Route, RouteOutput};
 
 pub struct ShellRouter {
     routes: Vec<Route>
@@ -10,16 +10,25 @@ impl ShellRouter {
         Self { routes }
     }
 
-    pub fn execute(&self, method: &Method, path: &Path) -> String {
+    pub fn execute(&self, method: &Method, path: &Path) -> Result<RouteOutput, RouterError> {
         let match_result = self.routes.iter().find_map(|r| {
             r.matches(method, path)
                 .map(|m| (r, m))
         });
 
         if let Some((route, params)) = match_result {
-            route.execute(params).unwrap()
+            Ok(route.execute(params)
+                .map_err(|e| RouterError::RouteSpawnFailed(e))?)
         } else {
-            "Uh, Oh! It broke!".to_string()
+            Err(RouterError::RouteNotFound)
         }
     }
+}
+
+#[derive(thiserror::Error, Debug)]
+pub enum RouterError {
+    #[error("No matching route found")]
+    RouteNotFound,
+    #[error("Route command failed to spawn")]
+    RouteSpawnFailed(#[from] crate::Error),
 }

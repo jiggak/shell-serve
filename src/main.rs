@@ -1,14 +1,38 @@
 #[macro_use] extern crate rocket;
 
-use rocket::State;
-use shell_serve::{route::{Method, Route},router::ShellRouter};
+use rocket::{http::Status, State};
+use shell_serve::route::{Method, Route, RouteOutput};
+use shell_serve::router::{RouterError, ShellRouter};
 use std::path::PathBuf;
 
 
+// TODO Consider using rocket responders for RouteOutput and RouteError
+fn route_output_response(result: Result<RouteOutput, RouterError>) -> (Status, Vec<u8>) {
+    let output = match result {
+        Ok(output) => output,
+        Err(e) => return match e {
+            RouterError::RouteNotFound => (Status::NotFound, vec![]),
+            RouterError::RouteSpawnFailed(_) => (Status::InternalServerError, vec![])
+        }
+    };
+
+    // TODO how to return 400 errors when process exit status limit is 255?
+    let status = if output.status_ok() {
+        Status::Ok
+    } else {
+        Status::InternalServerError
+    };
+
+    let body = output.stdout();
+
+    // TODO can I somehow stream command output without buffering?
+    (status, body.to_vec())
+}
+
 #[get("/<path..>")]
-fn _get(path: PathBuf, router: &State<ShellRouter>) -> String {
-    // format!("Hello, world! {:?} {:?}", path, route)
-    router.execute(&Method::Get, &path)
+fn _get(path: PathBuf, router: &State<ShellRouter>) -> (Status, Vec<u8>) {
+    let result = router.execute(&Method::Get, &path);
+    route_output_response(result)
 }
 
 #[put("/<path..>")]

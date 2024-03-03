@@ -1,7 +1,7 @@
 use std::{
-    collections::HashMap, io::Read, path::{Component, Path}, process::{Command, Stdio}, str::FromStr
+    collections::HashMap, path::{Component, Path}, process::{Command, Output, Stdio}, str::FromStr
 };
-use crate::Error;
+use super::Error;
 
 
 #[derive(Debug, Eq, PartialEq)]
@@ -148,23 +148,47 @@ impl Route {
         Some(params)
     }
 
-    pub fn execute(&self, params: Vec<(&String, String)>) -> Result<String, Error> {
+    pub fn execute(&self, params: Vec<(&String, String)>) -> Result<RouteOutput, Error> {
         let mut cmd = self.get_command(params)?;
 
-        // TODO error handling
-        let mut child = cmd
+        let child = cmd
+            .stdin(Stdio::piped())
             .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
             .spawn()
             .map_err(|e| Error::RouteSpawn(e))?;
 
-        let mut stdout = child.stdout
-            .take()
-            .expect("failed to take child stdout");
+        let output = child.wait_with_output()
+            .map_err(|e| Error::RouteSpawn(e))?;
 
-        let mut buf = String::new();
-        stdout.read_to_string(&mut buf)
-            .expect("failed to read string from stdout");
-        Ok(buf)
+        Ok(RouteOutput::new(output))
+    }
+}
+
+pub struct RouteOutput {
+    output: Output
+}
+
+impl RouteOutput {
+    pub fn new(output: Output) -> Self {
+        RouteOutput { output }
+    }
+
+    // pub fn stdout(&self) -> &[u8] {
+    pub fn stdout(&self) -> &Vec<u8> {
+        &self.output.stdout
+    }
+
+    pub fn status_ok(&self) -> bool {
+        self.output.status.success()
+    }
+
+    pub fn status(&self) -> Result<(), i32> {
+        if self.output.status.success() {
+            Ok(())
+        } else {
+            Err(self.output.status.code().unwrap())
+        }
     }
 }
 
