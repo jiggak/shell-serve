@@ -1,6 +1,7 @@
 use std::{
-    collections::HashMap, path::{Component, Path}, process::{Command, Output, Stdio}, str::FromStr
+    collections::HashMap, path::{Component, Path}, process::Stdio, str::FromStr
 };
+use tokio::{io, process::{Child, Command}};
 use super::Error;
 
 
@@ -148,7 +149,7 @@ impl Route {
         Some(params)
     }
 
-    pub fn execute(&self, params: Vec<(&String, String)>) -> Result<RouteOutput, Error> {
+    pub fn spawn(&self, params: Vec<(&String, String)>) -> Result<RouteOutput, Error> {
         let mut cmd = self.get_command(params)?;
 
         let child = cmd
@@ -158,37 +159,40 @@ impl Route {
             .spawn()
             .map_err(|e| Error::RouteSpawn(e))?;
 
-        let output = child.wait_with_output()
-            .map_err(|e| Error::RouteSpawn(e))?;
-
-        Ok(RouteOutput::new(output))
+        Ok(RouteOutput::new(child))
     }
 }
 
 pub struct RouteOutput {
-    output: Output
+    child: Child
 }
 
 impl RouteOutput {
-    pub fn new(output: Output) -> Self {
-        RouteOutput { output }
+    pub fn new(child: Child) -> Self {
+        RouteOutput { child }
     }
 
-    // pub fn stdout(&self) -> &[u8] {
-    pub fn stdout(&self) -> &Vec<u8> {
-        &self.output.stdout
+    pub fn stdout(&mut self) -> Result<impl io::AsyncRead, Error> {
+        Ok(self.child.stdout.take()
+            .ok_or(Error::RouteIoOpen)?)
     }
 
-    pub fn status_ok(&self) -> bool {
-        self.output.status.success()
+    pub async fn write_stdin<S>(&mut self, reader: &mut S) -> Result<u64, Error>
+        where S: io::AsyncRead + Unpin
+    {
+        let stdin = self.child.stdin.take()
+        .ok_or(Error::RouteIoOpen)?;
+
+        let mut writer = io::BufWriter::new(stdin);
+
+        Ok(io::copy(reader, &mut writer).await?)
     }
 
-    pub fn status(&self) -> Result<(), i32> {
-        if self.output.status.success() {
-            Ok(())
-        } else {
-            Err(self.output.status.code().unwrap())
-        }
+    pub async fn wait(mut self) -> Result<bool, Error> {
+        let status = self.child.wait().await
+            .map_err(|e| Error::RouteWait(e))?;
+
+        Ok(status.success())
     }
 }
 

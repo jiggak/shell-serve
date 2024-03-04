@@ -17,8 +17,7 @@ impl ShellRouter {
         });
 
         if let Some((route, params)) = match_result {
-            Ok(route.execute(params)
-                .map_err(|e| RouterError::RouteSpawnFailed(e))?)
+            Ok(route.spawn(params)?)
         } else {
             Err(RouterError::RouteNotFound)
         }
