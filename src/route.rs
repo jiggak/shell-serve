@@ -1,6 +1,7 @@
 use std::{
     collections::HashMap, path::{Component, Path}, process::Stdio, str::FromStr
 };
+use rocket::http::Status;
 use tokio::{io, process::{Child, Command}};
 use super::Error;
 
@@ -188,11 +189,17 @@ impl RouteOutput {
         Ok(io::copy(reader, &mut writer).await?)
     }
 
-    pub async fn wait(mut self) -> Result<bool, Error> {
+    pub async fn wait(mut self) -> Result<Status, Error> {
         let status = self.child.wait().await
             .map_err(|e| Error::RouteWait(e))?;
 
-        Ok(status.success())
+        // FIXME orig plan was to use process exit status for http response status
+        // but that won't work since max exit status is 255
+        Ok(if status.success() {
+            Status::Ok
+        } else {
+            Status::InternalServerError
+        })
     }
 }
 
