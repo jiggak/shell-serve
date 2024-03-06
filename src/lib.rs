@@ -13,6 +13,12 @@ pub enum Error {
     #[error("Invalid route: {0}")]
     InvalidRoute(String),
 
+    #[error("Invalid header: {0}")]
+    InvalidHeader(String),
+
+    #[error("Invalid status code: {0}")]
+    InvalidStatus(String),
+
     #[error("Failed to spawn route cmd")]
     RouteSpawn(#[source] std::io::Error),
 

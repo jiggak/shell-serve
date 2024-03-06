@@ -1,7 +1,8 @@
 use std::{
-    collections::HashMap, path::{Component, Path}, process::Stdio, str::FromStr
+    collections::HashMap, io::Read, os::fd::{AsRawFd, OwnedFd},
+    path::{Component, Path}, process::{self, Stdio}, str::FromStr
 };
-use rocket::http::Status;
+use rocket::http::{Header, HeaderMap, Status};
 use tokio::{io, process::{Child, Command}};
 use super::Error;
 
@@ -105,7 +106,6 @@ impl Route {
         Ok(cmd)
     }
 
-    //pub fn matches<P: AsRef<Path>>(&self, method: &Method, path: P) -> bool {
     pub fn matches(&self, method: &Method, path: &Path) -> Option<Vec<(&String, String)>> {
         if self.method != *method {
             return None;
@@ -153,6 +153,16 @@ impl Route {
     pub fn spawn(&self, params: Vec<(&String, String)>) -> Result<RouteOutput, Error> {
         let mut cmd = self.get_command(params)?;
 
+        let (read_pipe, write_pipe) = os_pipe::pipe()?;
+        let write_pipe_fd: OwnedFd = write_pipe.into();
+
+        let write_pipe_path = format!("/proc/{}/fd/{}",
+            process::id(),
+            write_pipe_fd.as_raw_fd()
+        );
+
+        cmd.env("SHELL_SERVE_PIPE", write_pipe_path);
+
         let child = cmd
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
@@ -160,17 +170,19 @@ impl Route {
             .spawn()
             .map_err(|e| Error::RouteSpawn(e))?;
 
-        Ok(RouteOutput::new(child))
+        Ok(RouteOutput::new(child, read_pipe, write_pipe_fd))
     }
 }
 
 pub struct RouteOutput {
-    child: Child
+    child: Child,
+    read_pipe: os_pipe::PipeReader,
+    write_pipe_fd: OwnedFd
 }
 
 impl RouteOutput {
-    pub fn new(child: Child) -> Self {
-        RouteOutput { child }
+    pub fn new(child: Child, read_pipe: os_pipe::PipeReader, write_pipe_fd: OwnedFd) -> Self {
+        RouteOutput { child, read_pipe, write_pipe_fd }
     }
 
     pub fn stdout(&mut self) -> Result<impl io::AsyncRead, Error> {
@@ -193,13 +205,43 @@ impl RouteOutput {
         let status = self.child.wait().await
             .map_err(|e| Error::RouteWait(e))?;
 
-        // FIXME orig plan was to use process exit status for http response status
-        // but that won't work since max exit status is 255
-        Ok(if status.success() {
-            Status::Ok
-        } else {
-            Status::InternalServerError
-        })
+        // close writer side to avoid blocking reader
+        drop(self.write_pipe_fd);
+
+        let mut pipe_buf = String::new();
+        self.read_pipe.read_to_string(&mut pipe_buf)?;
+
+        let headers = pipe_buf.lines()
+            .map(parse_header)
+            .collect::<Result<Vec<_>, _>>()?;
+
+        let mut header_map = HeaderMap::new();
+        for header in headers {
+            header_map.add(header);
+        }
+
+        let status = match header_map.get_one("Status") {
+            Some(status) => Status::from_code(
+                status.parse().map_err(|_| Error::InvalidStatus(status.to_string()))?
+            ).ok_or(Error::InvalidStatus(status.to_string()))?,
+            None => match status.success() {
+                true => Status::Ok,
+                false => Status::InternalServerError
+            }
+        };
+
+        Ok(status)
+    }
+}
+
+fn parse_header(line: &str) -> Result<Header, Error> {
+    let parts: Vec<_> = line.splitn(2, ':')
+        .map(|s| s.trim())
+        .collect();
+
+    match &parts[..] {
+        &[name, value, ..] => Ok(Header::new(name, value)),
+        _ => Err(Error::InvalidHeader(line.to_owned()))
     }
 }
 
