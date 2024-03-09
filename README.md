@@ -12,3 +12,24 @@ GET:/{path..}=handler.sh ${path}
 
 curl -i http://localhost:8000/foo/baz.txt
 curl -i http://localhost:8000/foo/baz.txt --upload-file hello.txt
+
+GET
+* Req body: no
+* Resp body: yes (required?)
+* Status: 200
+PUT
+* Req body: yes
+* Resp body: yes (optional)
+* Status: 200 (204 resp empty)
+POST
+* Req body: yes
+* Resp body: yes (optional)
+* Status: 200 (204 resp empty)
+PATCH
+* Req body: yes
+* Resp body: yes (optional)
+* Status: 200 (204 resp empty)
+DELETE
+* Req body: no
+* Resp body: yes (optional)
+* Status: 200

@@ -60,7 +60,7 @@ async fn _post(path: PathBuf, data: Data<'_>, router: &State<ShellRouter>) -> Ro
 
 #[delete("/<path..>")]
 async fn _delete(path: PathBuf, router: &State<ShellRouter>) -> RouteResult {
-    let proc = router.execute(&Method::Get, &path)?;
+    let proc = router.execute(&Method::Delete, &path)?;
     let response = proc.wait().await?;
 
     Ok(response)

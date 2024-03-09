@@ -199,7 +199,7 @@ impl RouteProcess {
         where S: io::AsyncRead + Unpin
     {
         let stdin = self.child.stdin.take()
-        .ok_or(Error::RouteIoOpen)?;
+            .ok_or(Error::RouteIoOpen)?;
 
         let mut writer = io::BufWriter::new(stdin);
 
