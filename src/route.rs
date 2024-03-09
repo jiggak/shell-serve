@@ -2,8 +2,10 @@ use std::{
     collections::HashMap, io::Read, os::fd::{AsRawFd, OwnedFd},
     path::{Component, Path}, process::{self, Stdio}, str::FromStr
 };
-use rocket::http::{Header, HeaderMap, Status};
+use rocket::http::Status;
 use tokio::{io, process::{Child, Command}};
+
+use crate::route_response::RouteResponse;
 use super::Error;
 
 
@@ -11,6 +13,7 @@ use super::Error;
 pub enum Method {
     Get,
     Put,
+    Post,
     Delete
 }
 
@@ -21,6 +24,7 @@ impl FromStr for Method {
         match s {
             "GET" => Ok(Method::Get),
             "PUT" => Ok(Method::Put),
+            "POST" => Ok(Method::Post),
             "DELETE" => Ok(Method::Delete),
             _ => Err(Error::InvalidMethod(s.to_string()))
         }
@@ -150,12 +154,13 @@ impl Route {
         Some(params)
     }
 
-    pub fn spawn(&self, params: Vec<(&String, String)>) -> Result<RouteOutput, Error> {
+    pub fn spawn(&self, params: Vec<(&String, String)>) -> Result<RouteProcess, Error> {
         let mut cmd = self.get_command(params)?;
 
         let (read_pipe, write_pipe) = os_pipe::pipe()?;
         let write_pipe_fd: OwnedFd = write_pipe.into();
 
+        // FIXME could this be made cross platform, or at least work on MacOS?
         let write_pipe_path = format!("/proc/{}/fd/{}",
             process::id(),
             write_pipe_fd.as_raw_fd()
@@ -170,19 +175,19 @@ impl Route {
             .spawn()
             .map_err(|e| Error::RouteSpawn(e))?;
 
-        Ok(RouteOutput::new(child, read_pipe, write_pipe_fd))
+        Ok(RouteProcess::new(child, read_pipe, write_pipe_fd))
     }
 }
 
-pub struct RouteOutput {
+pub struct RouteProcess {
     child: Child,
     read_pipe: os_pipe::PipeReader,
     write_pipe_fd: OwnedFd
 }
 
-impl RouteOutput {
+impl RouteProcess {
     pub fn new(child: Child, read_pipe: os_pipe::PipeReader, write_pipe_fd: OwnedFd) -> Self {
-        RouteOutput { child, read_pipe, write_pipe_fd }
+        RouteProcess { child, read_pipe, write_pipe_fd }
     }
 
     pub fn stdout(&mut self) -> Result<impl io::AsyncRead, Error> {
@@ -201,11 +206,11 @@ impl RouteOutput {
         Ok(io::copy(reader, &mut writer).await?)
     }
 
-    pub async fn wait(mut self) -> Result<Status, Error> {
+    pub async fn wait(mut self) -> Result<RouteResponse, Error> {
         let status = self.child.wait().await
             .map_err(|e| Error::RouteWait(e))?;
 
-        // close writer side to avoid blocking reader
+        // close writer side of pipe to avoid blocking reader
         drop(self.write_pipe_fd);
 
         let mut pipe_buf = String::new();
@@ -215,13 +220,8 @@ impl RouteOutput {
             .map(parse_header)
             .collect::<Result<Vec<_>, _>>()?;
 
-        let mut header_map = HeaderMap::new();
-        for header in headers {
-            header_map.add(header);
-        }
-
-        let status = match header_map.get_one("Status") {
-            Some(status) => Status::from_code(
+        let status = match headers.iter().find(|(k, _)| k == "Status") {
+            Some((_, status)) => Status::from_code(
                 status.parse().map_err(|_| Error::InvalidStatus(status.to_string()))?
             ).ok_or(Error::InvalidStatus(status.to_string()))?,
             None => match status.success() {
@@ -230,17 +230,20 @@ impl RouteOutput {
             }
         };
 
-        Ok(status)
+        let stdout = self.child.stdout.take()
+            .ok_or(Error::RouteIoOpen)?;
+
+        Ok(RouteResponse::new(status, headers, stdout))
     }
 }
 
-fn parse_header(line: &str) -> Result<Header, Error> {
+fn parse_header(line: &str) -> Result<(String, String), Error> {
     let parts: Vec<_> = line.splitn(2, ':')
         .map(|s| s.trim())
         .collect();
 
     match &parts[..] {
-        &[name, value, ..] => Ok(Header::new(name, value)),
+        &[name, value, ..] => Ok((name.to_owned(), value.to_owned())),
         _ => Err(Error::InvalidHeader(line.to_owned()))
     }
 }

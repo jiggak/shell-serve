@@ -1,5 +1,5 @@
 use std::path::Path;
-use crate::route::{Method, Route, RouteOutput};
+use crate::route::{Method, Route, RouteProcess};
 
 pub struct ShellRouter {
     routes: Vec<Route>
@@ -10,7 +10,7 @@ impl ShellRouter {
         Self { routes }
     }
 
-    pub fn execute(&self, method: &Method, path: &Path) -> Result<RouteOutput, RouterError> {
+    pub fn execute(&self, method: &Method, path: &Path) -> Result<RouteProcess, RouterError> {
         let match_result = self.routes.iter().find_map(|r| {
             r.matches(method, path)
                 .map(|m| (r, m))

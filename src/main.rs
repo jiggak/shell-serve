@@ -1,10 +1,7 @@
 #[macro_use] extern crate rocket;
 
 use rocket::{data::{Data, ToByteUnit}, http::Status, State};
-use rocket::response::stream::ReaderStream;
-use rocket::response::status;
-use rocket::tokio::io::AsyncRead;
-use shell_serve::route::{Method, Route};
+use shell_serve::{route::{Method, Route}, route_response::RouteResponse};
 use shell_serve::router::{RouterError, ShellRouter};
 use std::path::PathBuf;
 
@@ -15,7 +12,7 @@ struct RouteErrorResponse(Status);
 impl From<RouterError> for RouteErrorResponse {
     fn from(value: RouterError) -> Self {
         match value {
-            RouterError::RouteNotFound => RouteErrorResponse(Status::NotFound),
+            RouterError::RouteNotFound => RouteErrorResponse(Status::NotImplemented),
             RouterError::RouteSpawnFailed(_) => RouteErrorResponse(Status::InternalServerError)
         }
     }
@@ -27,47 +24,58 @@ impl From<shell_serve::Error> for RouteErrorResponse {
     }
 }
 
+type RouteResult = Result<RouteResponse, RouteErrorResponse>;
+
 #[get("/<path..>")]
-async fn _get(path: PathBuf, router: &State<ShellRouter>) -> Result<status::Custom<ReaderStream![impl AsyncRead]>, RouteErrorResponse> {
-    let mut output = router.execute(&Method::Get, &path)?;
-    let stdout = output.stdout()?;
+async fn _get(path: PathBuf, router: &State<ShellRouter>) -> RouteResult {
+    let proc = router.execute(&Method::Get, &path)?;
+    let response = proc.wait().await?;
 
-    let status = output.wait().await?;
-
-    // TODO trade-off of streaming is unknown Content-Length, do I care?
-    // TODO how could the handler provide Content-Type? ReaderStream is octet-stream
-    Ok(status::Custom(status, ReaderStream::one(stdout)))
+    Ok(response)
 }
 
 #[put("/<path..>", data = "<data>")]
-async fn _put(path: PathBuf, data: Data<'_>, router: &State<ShellRouter>) -> Result<status::Custom<ReaderStream![impl AsyncRead]>, RouteErrorResponse> {
+async fn _put(path: PathBuf, data: Data<'_>, router: &State<ShellRouter>) -> RouteResult {
+    let mut proc = router.execute(&Method::Put, &path)?;
+
     let mut stream = data.open(10.megabytes());
+    proc.write_stdin(&mut stream).await?;
 
-    let mut output = router.execute(&Method::Put, &path)?;
+    let response = proc.wait().await?;
 
-    output.write_stdin(&mut stream).await?;
+    Ok(response)
+}
 
-    let stdout = output.stdout()?;
-    let status = output.wait().await?;
+#[post("/<path..>", data = "<data>")]
+async fn _post(path: PathBuf, data: Data<'_>, router: &State<ShellRouter>) -> RouteResult {
+    let mut proc = router.execute(&Method::Post, &path)?;
 
-    Ok(status::Custom(status, ReaderStream::one(stdout)))
+    let mut stream = data.open(10.megabytes());
+    proc.write_stdin(&mut stream).await?;
+
+    let response = proc.wait().await?;
+
+    Ok(response)
 }
 
 #[delete("/<path..>")]
-fn _delete(path: PathBuf) {
-    println!("_delete {:?}", path);
+async fn _delete(path: PathBuf, router: &State<ShellRouter>) -> RouteResult {
+    let proc = router.execute(&Method::Get, &path)?;
+    let response = proc.wait().await?;
+
+    Ok(response)
 }
 
 #[launch]
 fn rocket() -> _ {
     let router = ShellRouter::new(vec![
-        "GET:/{path..}=echo Hello ${path}".parse::<Route>().unwrap(),
+        "GET:/{path..}=./foo.sh ${path}".parse::<Route>().unwrap(),
         "PUT:/{path..}=cat".parse::<Route>().unwrap()
     ]);
 
     rocket::build()
         .manage(router)
-        .mount("/", routes![_get, _put, _delete])
+        .mount("/", routes![_get, _put, _post, _delete])
 }
 
 // #[rocket::main]
