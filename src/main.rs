@@ -28,40 +28,38 @@ type RouteResult = Result<RouteResponse, RouteErrorResponse>;
 
 #[get("/<path..>")]
 async fn _get(path: PathBuf, router: &State<ShellRouter>) -> RouteResult {
-    let proc = router.execute(&Method::Get, &path)?;
-    let response = proc.wait().await?;
+    let response = router.execute(&Method::Get, &path)?
+        .wait().await?;
 
     Ok(response)
 }
 
 #[put("/<path..>", data = "<data>")]
 async fn _put(path: PathBuf, data: Data<'_>, router: &State<ShellRouter>) -> RouteResult {
-    let mut proc = router.execute(&Method::Put, &path)?;
-
     let mut stream = data.open(10.megabytes());
-    proc.write_stdin(&mut stream).await?;
 
-    let response = proc.wait().await?;
+    let response = router.execute(&Method::Put, &path)?
+        .load_stdin(&mut stream).await?
+        .wait().await?;
 
     Ok(response)
 }
 
 #[post("/<path..>", data = "<data>")]
 async fn _post(path: PathBuf, data: Data<'_>, router: &State<ShellRouter>) -> RouteResult {
-    let mut proc = router.execute(&Method::Post, &path)?;
-
     let mut stream = data.open(10.megabytes());
-    proc.write_stdin(&mut stream).await?;
 
-    let response = proc.wait().await?;
+    let response = router.execute(&Method::Post, &path)?
+        .load_stdin(&mut stream).await?
+        .wait().await?;
 
     Ok(response)
 }
 
 #[delete("/<path..>")]
 async fn _delete(path: PathBuf, router: &State<ShellRouter>) -> RouteResult {
-    let proc = router.execute(&Method::Delete, &path)?;
-    let response = proc.wait().await?;
+    let response = router.execute(&Method::Delete, &path)?
+        .wait().await?;
 
     Ok(response)
 }
@@ -78,9 +76,12 @@ fn rocket() -> _ {
         .mount("/", routes![_get, _put, _post, _delete])
 }
 
-// #[rocket::main]
-// async fn main() {
-//     // Recall that an uninspected `Error` will cause a pretty-printed panic,
-//     // so rest assured errors do not go undetected when using `#[launch]`.
-//     let _ = rocket().launch().await;
-// }
+/*
+#[rocket::main]
+async fn main() {
+    // Recall that an uninspected `Error` will cause a pretty-printed panic,
+    // so rest assured errors do not go undetected when using `#[launch]`.
+    println!("got here");
+    let _ = rocket().launch().await;
+}
+*/

@@ -182,36 +182,33 @@ impl Route {
 pub struct RouteProcess {
     child: Child,
     read_pipe: os_pipe::PipeReader,
-    write_pipe_fd: OwnedFd
+    write_pipe_fd: Option<OwnedFd>
 }
 
 impl RouteProcess {
     pub fn new(child: Child, read_pipe: os_pipe::PipeReader, write_pipe_fd: OwnedFd) -> Self {
-        RouteProcess { child, read_pipe, write_pipe_fd }
+        RouteProcess { child, read_pipe, write_pipe_fd: Some(write_pipe_fd) }
     }
 
-    pub fn stdout(&mut self) -> Result<impl io::AsyncRead, Error> {
-        Ok(self.child.stdout.take()
-            .ok_or(Error::RouteIoOpen)?)
-    }
-
-    pub async fn write_stdin<S>(&mut self, reader: &mut S) -> Result<u64, Error>
+    pub async fn load_stdin<S>(&mut self, reader: &mut S) -> Result<&mut Self, Error>
         where S: io::AsyncRead + Unpin
     {
-        let stdin = self.child.stdin.take()
+        let mut stdin = self.child.stdin.take()
             .ok_or(Error::RouteIoOpen)?;
 
-        let mut writer = io::BufWriter::new(stdin);
+        io::copy(reader, &mut stdin).await?;
 
-        Ok(io::copy(reader, &mut writer).await?)
+        Ok(self)
     }
 
-    pub async fn wait(mut self) -> Result<RouteResponse, Error> {
+    pub async fn wait(&mut self) -> Result<RouteResponse, Error> {
         let status = self.child.wait().await
             .map_err(|e| Error::RouteWait(e))?;
 
         // close writer side of pipe to avoid blocking reader
-        drop(self.write_pipe_fd);
+        let write_pipe_fd = self.write_pipe_fd.take()
+            .expect("write_pipe_fd should be set");
+        drop(write_pipe_fd);
 
         let mut pipe_buf = String::new();
         self.read_pipe.read_to_string(&mut pipe_buf)?;
