@@ -1,4 +1,4 @@
-use std::path::Path;
+use std::{collections::HashMap, path::Path};
 use crate::route::{Method, Route, RouteProcess};
 
 pub struct ShellRouter {
@@ -10,9 +10,9 @@ impl ShellRouter {
         Self { routes }
     }
 
-    pub fn execute(&self, method: &Method, path: &Path) -> Result<RouteProcess, RouterError> {
+    pub fn execute(&self, method: &Method, path: &Path, query: &HashMap<&str, &str>) -> Result<RouteProcess, RouterError> {
         let match_result = self.routes.iter().find_map(|r| {
-            r.matches(method, path)
+            r.matches(method, path, query)
                 .map(|m| (r, m))
         });
 

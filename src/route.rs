@@ -32,9 +32,26 @@ impl FromStr for Method {
 }
 
 #[derive(Debug, Eq, PartialEq)]
-enum PathPart {
+enum RoutePart {
     Literal(String),
-    Named(String),
+    Named(String)
+}
+
+impl FromStr for RoutePart {
+    type Err = Error;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        if s.starts_with('{') {
+            Ok(Self::Named(s[1..s.len()-1].to_string()))
+        } else {
+            Ok(Self::Literal(s.to_string()))
+        }
+    }
+}
+
+#[derive(Debug, Eq, PartialEq)]
+enum PathPart {
+    Entry(RoutePart),
     CatchAll(String)
 }
 
@@ -42,16 +59,31 @@ impl FromStr for PathPart {
     type Err = Error;
 
     fn from_str(s: &str) -> Result<Self, Error> {
-        if s.starts_with('{') {
-            if s.ends_with("..}") {
-                Ok(PathPart::CatchAll(s[1..s.len()-3].to_string()))
-            } else if s.ends_with('}') {
-                Ok(PathPart::Named(s[1..s.len()-1].to_string()))
-            } else {
-                Err(Error::InvalidPathPart(s.to_string()))
-            }
+        if s.starts_with('{') && s.ends_with("..}") {
+            Ok(Self::CatchAll(s[1..s.len()-3].to_string()))
         } else {
-            Ok(PathPart::Literal(s.to_string()))
+            Ok(Self::Entry(s.parse()?))
+        }
+    }
+}
+
+#[derive(Debug, Eq, PartialEq)]
+enum QueryPart {
+    KeyValue(String, RoutePart),
+    CatchAll(String)
+}
+
+impl FromStr for QueryPart {
+    type Err = Error;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        if s.starts_with('{') && s.ends_with("..}") {
+            Ok(Self::CatchAll(s[1..s.len()-3].to_string()))
+        } else {
+            let (name, value) = s.split_once('=')
+                .ok_or(Error::InvalidRoute("invalid key=value entry in query".to_string()))?;
+
+            Ok(Self::KeyValue(name.to_string(), value.parse()?))
         }
     }
 }
@@ -60,6 +92,7 @@ impl FromStr for PathPart {
 pub struct Route {
     method: Method,
     path: Vec<PathPart>,
+    query: Option<Vec<QueryPart>>,
     handler: String
 }
 
@@ -68,10 +101,22 @@ impl FromStr for Route {
 
     fn from_str(s: &str) -> Result<Self, Self::Err> {
         let (method, path) = s.split_once(':')
-            .ok_or(Error::InvalidRoute("missing :".to_string()))?;
+            .ok_or(Error::InvalidRoute("missing method separator (:)".to_string()))?;
 
-        let (path, handler) = path.split_once('=')
-            .ok_or(Error::InvalidRoute("missing =".to_string()))?;
+        let (path, handler) = path.split_once(' ')
+            .ok_or(Error::InvalidRoute("missing handler separator (space)".to_string()))?;
+
+        let path_parts = path.split_once('?');
+        let (path, query) = if let Some((path, query)) = path_parts {
+            let query: Result<Vec<_>, Error> = query.split('&')
+                .into_iter()
+                .map(|s| QueryPart::from_str(s))
+                .collect();
+
+            (path, Some(query?))
+        } else {
+            (path, None)
+        };
 
         let path: Result<Vec<_>, Error> = path.split('/')
             .into_iter()
@@ -82,6 +127,7 @@ impl FromStr for Route {
         Ok(Route {
             method: Method::from_str(method)?,
             path: path?,
+            query,
             handler: handler.to_string()
         })
     }
@@ -110,7 +156,7 @@ impl Route {
         Ok(cmd)
     }
 
-    pub fn matches(&self, method: &Method, path: &Path) -> Option<Vec<(&String, String)>> {
+    pub fn matches(&self, method: &Method, path: &Path, query: &HashMap<&str, &str>) -> Option<Vec<(&String, String)>> {
         if self.method != *method {
             return None;
         }
@@ -136,17 +182,54 @@ impl Route {
             let p = p.to_str().unwrap().to_string();
 
             match r {
-                PathPart::Literal(v) => {
+                PathPart::Entry(RoutePart::Literal(v)) => {
                     if v != &p {
+                        // literal route component doesn't match, return no-match
                         return None;
                     }
                 },
-                PathPart::Named(n) => {
+                PathPart::Entry(RoutePart::Named(n)) => {
                     params.push((n, p))
                 },
                 PathPart::CatchAll(n) => {
                     let path = Path::new(&p).join(iter_path.as_path());
                     params.push((n, path.to_str().unwrap().to_string()))
+                }
+            }
+        }
+
+        if let Some(route_query) = &self.query {
+            // clone query so we can remove matched entries, to get remainder for catch-all
+            let mut query = query.clone();
+
+            for entry in route_query {
+                match entry {
+                    QueryPart::KeyValue(route_query_k, route_query_v) => {
+                        if let Some(value) = query.remove(route_query_k.as_str()) {
+                            match route_query_v {
+                                RoutePart::Literal(v) => {
+                                    if v != value {
+                                        // literal route query value doesn't match, return no-match
+                                        return None;
+                                    }
+                                },
+                                RoutePart::Named(n) => {
+                                    params.push((&n, value.to_string()))
+                                }
+                            }
+                        } else {
+                            // key not found in query, return no-match
+                            return None;
+                        }
+                    },
+                    QueryPart::CatchAll(n) => {
+                        let query_params = query.iter()
+                            .map(|(k, v)| format!("{k}={v}"))
+                            .collect::<Vec<_>>()
+                            .join(",");
+
+                        params.push((n, query_params))
+                    }
                 }
             }
         }
@@ -251,47 +334,90 @@ mod tests {
 
     #[test]
     fn test_route_parse() {
-        let route = Route::from_str("GET:/foo/{file}=handler_get_foo.sh ${file}");
+        let route = Route::from_str("GET:/foo/{file} handler_get_foo.sh ${file}");
         assert!(route.is_ok());
         let route = route.unwrap();
 
         assert_eq!(route.method, Method::Get);
         assert_eq!(route.path, vec![
-            PathPart::Literal("foo".to_string()),
-            PathPart::Named("file".to_string())
+            PathPart::Entry(RoutePart::Literal("foo".to_string())),
+            PathPart::Entry(RoutePart::Named("file".to_string()))
         ]);
         assert_eq!(route.handler, "handler_get_foo.sh ${file}");
     }
 
     #[test]
-    fn test_route_match() {
-        let route = Route::from_str("GET:/foo/{file}=handler.sh ${file}");
+    fn test_route_match_literal() {
+        let route = Route::from_str("GET:/foo/{file} handler.sh ${file}");
         assert!(route.is_ok());
         let route = route.unwrap();
 
+        let query = HashMap::new();
+
         assert_eq!(
-            route.matches(&Method::Get, Path::new("/foo/foo.txt")),
+            route.matches(&Method::Get, Path::new("/foo/foo.txt"), &query),
             Some(vec![(&String::from("file"), String::from("foo.txt"))])
         );
         assert_eq!(
-            route.matches(&Method::Get, Path::new("/bar/baz/foo.txt")),
+            route.matches(&Method::Get, Path::new("/bar/baz/foo.txt"), &query),
             None
         );
         assert_eq!(
-            route.matches(&Method::Get, Path::new("/bar/foo.txt")),
+            route.matches(&Method::Get, Path::new("/bar/foo.txt"), &query),
             None
         );
         assert_eq!(
-            route.matches(&Method::Put, Path::new("/foo/foo.txt")),
+            route.matches(&Method::Put, Path::new("/foo/foo.txt"), &query),
             None
         );
+    }
 
-        let route = Route::from_str("GET:/{path..}=handler.sh ${path}");
+    #[test]
+    fn test_route_match_query() {
+        let route = Route::from_str("GET:/{path..}?foo={foo}&{query..} handler.sh ${path} ${foo}");
         assert!(route.is_ok());
         let route = route.unwrap();
 
+        let query = HashMap::from([("foo", "bar")]);
+
         assert_eq!(
-            route.matches(&Method::Get, Path::new("/foo/bar/foo.txt")),
+            route.matches(&Method::Get, Path::new("/foo/bar/foo.txt"), &query),
+            Some(vec![
+                (&String::from("path"), String::from("foo/bar/foo.txt")),
+                (&String::from("foo"), String::from("bar")),
+                (&String::from("query"), String::from("")),
+            ])
+        );
+
+        let query = HashMap::from([("foo", "bar"), ("baz", "foo")]);
+
+        assert_eq!(
+            route.matches(&Method::Get, Path::new("/foo/bar/foo.txt"), &query),
+            Some(vec![
+                (&String::from("path"), String::from("foo/bar/foo.txt")),
+                (&String::from("foo"), String::from("bar")),
+                (&String::from("query"), String::from("baz=foo")),
+            ])
+        );
+
+        let query = HashMap::from([("baz", "foo")]);
+
+        assert_eq!(
+            route.matches(&Method::Get, Path::new("/foo/bar/foo.txt"), &query),
+            None
+        );
+    }
+
+    #[test]
+    fn test_route_match_catchall() {
+        let route = Route::from_str("GET:/{path..} handler.sh ${path}");
+        assert!(route.is_ok());
+        let route = route.unwrap();
+
+        let query = HashMap::new();
+
+        assert_eq!(
+            route.matches(&Method::Get, Path::new("/foo/bar/foo.txt"), &query),
             Some(vec![(&String::from("path"), String::from("foo/bar/foo.txt"))])
         );
     }
