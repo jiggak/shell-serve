@@ -9,21 +9,17 @@ use std::{collections::HashMap, path::PathBuf};
 /*
 This could be used to get full uri with query string, maybe?
 Honestly I should concider just using hyper directly without rocket
-use rocket::request::FromRequest;
-use rocket::request::Outcome;
-use rocket::Request;
 
-pub struct HostHeader<'a>(pub &'a str);
+use rocket::{http::uri::Origin, Request, request::{FromRequest, Outcome}};
+
+pub struct RequestUri<'a>(pub Origin<'a>);
 
 #[rocket::async_trait]
-impl<'r> FromRequest<'r> for HostHeader<'r> {
+impl<'r> FromRequest<'r> for RequestUri<'r> {
     type Error = ();
 
     async fn from_request(req: &'r Request<'_>) -> Outcome<Self, Self::Error> {
-        match req.headers().get_one("Host") {
-            Some(h) => Outcome::Success(HostHeader(h)),
-            None => Outcome::Forward(()),
-        }
+        Outcome::Success(RequestUri(req.uri().to_owned()))
     }
 }
 */
@@ -48,6 +44,7 @@ impl From<shell_serve::Error> for RouteErrorResponse {
 
 type RouteResult = Result<RouteResponse, RouteErrorResponse>;
 
+// #[get("/<_..>")]
 #[get("/<path..>?<query..>")]
 async fn _get(path: PathBuf, query: HashMap<&str, &str>, router: &State<ShellRouter>) -> RouteResult {
     let response = router.execute(&Method::Get, &path, &query)?
