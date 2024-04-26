@@ -1,31 +1,34 @@
-use rocket::request::Request;
-use rocket::response::{self, Response, Responder};
-use rocket::http::Status;
+use http_body_util::{combinators::BoxBody, BodyExt, StreamBody};
+use hyper::{body::{Bytes, Frame}, Response, StatusCode};
 use tokio::process::ChildStdout;
+use tokio_util::io::ReaderStream;
+use futures_util::TryStreamExt;
 
 pub struct RouteResponse {
-    status: Status,
+    status: StatusCode,
     headers: Vec<(String, String)>,
     stdout: ChildStdout
 }
 
 impl RouteResponse {
-    pub fn new(status: Status, headers: Vec<(String, String)>, stdout: ChildStdout) -> Self {
+    pub fn new(status: StatusCode, headers: Vec<(String, String)>, stdout: ChildStdout) -> Self {
         Self { status, headers, stdout }
     }
-}
 
-#[rocket::async_trait]
-impl<'r> Responder<'r, 'static> for RouteResponse {
-    fn respond_to(self, _: &'r Request<'_>) -> response::Result<'static> {
-        let mut response = Response::build();
+    pub fn body(self) -> Response<BoxBody<Bytes, std::io::Error>> {
+        let reader_stream = ReaderStream::new(self.stdout);
+        let stream_body = StreamBody::new(reader_stream.map_ok(Frame::data));
+        let boxed_body = stream_body.boxed();
+
+        let mut builder = Response::builder();
 
         for (name, value) in self.headers {
-            response.raw_header(name, value);
+            builder = builder.header(name, value);
         }
 
-        response.status(self.status)
-            .streamed_body(self.stdout)
-            .ok()
+        builder.status(self.status)
+            //.body(StreamBody::new(self.stdout))
+            .body(boxed_body)
+            .unwrap()
     }
 }

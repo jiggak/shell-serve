@@ -2,14 +2,14 @@ use std::{
     collections::HashMap, io::Read, os::fd::{AsRawFd, OwnedFd},
     path::{Component, Path}, process::{self, Stdio}, str::FromStr
 };
-use rocket::http::Status;
+use hyper::StatusCode;
 use tokio::{io, process::{Child, Command}};
 
 use crate::route_response::RouteResponse;
 use super::Error;
 
 
-#[derive(Debug, Eq, PartialEq)]
+#[derive(Debug, Clone, Eq, PartialEq)]
 pub enum Method {
     Get,
     Put,
@@ -31,7 +31,7 @@ impl FromStr for Method {
     }
 }
 
-#[derive(Debug, Eq, PartialEq)]
+#[derive(Debug, Clone, Eq, PartialEq)]
 enum RoutePart {
     Literal(String),
     Named(String)
@@ -49,7 +49,7 @@ impl FromStr for RoutePart {
     }
 }
 
-#[derive(Debug, Eq, PartialEq)]
+#[derive(Debug, Clone, Eq, PartialEq)]
 enum PathPart {
     Entry(RoutePart),
     CatchAll(String)
@@ -67,7 +67,7 @@ impl FromStr for PathPart {
     }
 }
 
-#[derive(Debug, Eq, PartialEq)]
+#[derive(Debug, Clone, Eq, PartialEq)]
 enum QueryPart {
     KeyValue(String, RoutePart),
     CatchAll(String)
@@ -88,7 +88,7 @@ impl FromStr for QueryPart {
     }
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct Route {
     method: Method,
     path: Vec<PathPart>,
@@ -301,12 +301,12 @@ impl RouteProcess {
             .collect::<Result<Vec<_>, _>>()?;
 
         let status = match headers.iter().find(|(k, _)| k == "Status") {
-            Some((_, status)) => Status::from_code(
+            Some((_, status)) => StatusCode::from_u16(
                 status.parse().map_err(|_| Error::InvalidStatus(status.to_string()))?
-            ).ok_or(Error::InvalidStatus(status.to_string()))?,
+            ).map_err(|_| Error::InvalidStatus(status.to_string()))?,
             None => match status.success() {
-                true => Status::Ok,
-                false => Status::InternalServerError
+                true => StatusCode::OK,
+                false => StatusCode::INTERNAL_SERVER_ERROR
             }
         };
 

@@ -1,6 +1,8 @@
-use std::{collections::HashMap, path::Path};
 use crate::route::{Method, Route, RouteProcess};
+use std::{collections::HashMap, path::Path};
 
+
+#[derive(Clone)]
 pub struct ShellRouter {
     routes: Vec<Route>
 }
