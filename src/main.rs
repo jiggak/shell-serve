@@ -1,4 +1,4 @@
-use hyper::server::conn::http1;
+use hyper::{body, server::conn::http1, service::service_fn, Request};
 use hyper_util::rt::TokioIo;
 use shell_serve::{route::Route, router::ShellRouter};
 use std::net::SocketAddr;
@@ -20,7 +20,12 @@ pub async fn main() -> std::io::Result<()> {
         let (tcp, _) = listener.accept().await?;
         let io = TokioIo::new(tcp);
 
-        let service = router.clone();
+        let router = router.clone();
+
+        let service = service_fn(move |req: Request<body::Incoming>| {
+            let router = router.clone();
+            async move { router.call(req).await }
+        });
 
         tokio::task::spawn(async move {
             if let Err(err) = http1::Builder::new().serve_connection(io, service).await {

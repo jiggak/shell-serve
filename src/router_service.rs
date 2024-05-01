@@ -1,57 +1,62 @@
+use crate::{
+    route::{Method, RouteRequest, RouteResponse},
+    router::{RouterError, ShellRouter}
+};
 use futures_util::TryStreamExt;
-use http_body_util::{combinators::BoxBody, BodyStream};
-use hyper::body::Body;
-use hyper::{body, service::Service, Request, Response};
-use std::{collections::HashMap, future::Future, io::Error as IoError, path::Path, pin::Pin};
+use http_body_util::{combinators::BoxBody, BodyExt, BodyStream, Empty, StreamBody};
+use hyper::{body, body::Body, StatusCode, Request, Response};
+use std::{collections::HashMap, io::Error as IoError, str::FromStr, path::PathBuf};
 use tokio::io::AsyncRead;
-use tokio_util::io::StreamReader;
-
-use crate::{route::Method, router::ShellRouter, Error};
+use tokio_util::io::{ReaderStream, StreamReader};
 
 
-impl Service<Request<body::Incoming>> for ShellRouter {
-    type Response = Response<BoxBody<body::Bytes, IoError>>;
-    // type Response = Response<Full<body::Bytes>>;
-    type Error = hyper::Error;
-    type Future = Pin<Box<dyn Future<Output = Result<Self::Response, Self::Error>> + Send>>;
+type ServiceResponse = Response<BoxBody<body::Bytes, IoError>>;
 
-    fn call(&self, req: Request<body::Incoming>) -> Self::Future {
-        // let url = urlparse::urlparse(req.uri().into());
-        let method = req.method().try_into().unwrap();
+impl ShellRouter {
+    pub async fn call(&self, req: Request<body::Incoming>) -> Result<ServiceResponse, RouterError> {
+        let result = self._call(req).await;
+        match result {
+            Ok(response) => Ok(response),
+            Err(RouterError::UnsupportedMethod(_)) => {
+                Ok(empty_response(StatusCode::METHOD_NOT_ALLOWED))
+            },
+            Err(RouterError::RouteNotFound) => {
+                Ok(empty_response(StatusCode::NOT_FOUND))
+            },
+            Err(e) => Err(e)
+        }
+    }
 
-        let path = Path::new(req.uri().path());
-        let query = if let Some(query) = req.uri().query() {
-            urlparse::parse_qs(query).into_iter()
-                .map(|(key, val)| (key, val.join(",")))
-                .collect()
+    async fn _call(&self, req: Request<body::Incoming>) -> Result<ServiceResponse, RouterError> {
+        let route_req = to_route_req(&req)?;
+
+        let mut proc = self.execute(&route_req)?;
+
+        let proc = if req.body().size_hint().upper().unwrap_or(0) > 0 {
+            let stream_reader = body_stream_reader(req.into_body());
+            let mut stream_reader = std::pin::pin!(stream_reader);
+
+            proc.load_stdin(&mut stream_reader)
+                .await?
         } else {
-            HashMap::new()
+            &mut proc
         };
 
-        let query = query.iter()
-            .map(|(k, v)| (k.as_ref(), v.as_ref()))
-            .collect();
+        let result = proc.wait()
+            .await?;
 
-        let mut proc = self.execute(&method, &path, &query)
-            .unwrap();
-
-        Box::pin(async move {
-            let proc = if req.body().size_hint().upper().unwrap_or(0) > 0 {
-                let stream_reader = body_stream_reader(req.into_body());
-                let mut stream_reader = std::pin::pin!(stream_reader);
-
-                proc.load_stdin(&mut stream_reader)
-                    .await.unwrap()
-            } else {
-                &mut proc
-            };
-
-            let result = proc.wait()
-                .await.unwrap();
-
-            Ok(result.body())
-        })
+        Ok(route_response(result))
     }
+}
+
+fn empty_response(status: StatusCode) -> ServiceResponse {
+    let empty_body = Empty::<body::Bytes>::new()
+        .map_err(|never| match never {});
+
+    Response::builder()
+        .status(status)
+        .body(empty_body.boxed())
+        .unwrap()
 }
 
 fn body_stream_reader(body: body::Incoming) -> impl AsyncRead {
@@ -62,15 +67,37 @@ fn body_stream_reader(body: body::Incoming) -> impl AsyncRead {
     StreamReader::new(stream_of_bytes)
 }
 
-impl TryFrom<&hyper::Method> for Method {
-    type Error = crate::Error;
-    fn try_from(value: &hyper::Method) -> Result<Self, Self::Error> {
-        match *value {
-            hyper::Method::GET => Ok(Method::Get),
-            hyper::Method::PUT => Ok(Method::Put),
-            hyper::Method::POST => Ok(Method::Post),
-            hyper::Method::DELETE => Ok(Method::Delete),
-            _ => Err(Error::UnsupportedMethod)
-        }
+fn to_route_req(req: &Request<body::Incoming>) -> Result<RouteRequest, RouterError> {
+    let method = req.method().as_str();
+    let method = Method::from_str(method)
+        .map_err(|_| RouterError::UnsupportedMethod(method.into()))?;
+
+    let path = PathBuf::from(req.uri().path());
+
+    let query = if let Some(query) = req.uri().query() {
+        urlparse::parse_qs(query).into_iter()
+            .map(|(key, val)| (key, val.join(",")))
+            .collect()
+    } else {
+        HashMap::new()
+    };
+
+    Ok(RouteRequest { method, path, query })
+}
+
+fn route_response(res: RouteResponse) -> Response<BoxBody<body::Bytes, IoError>> {
+    let reader_stream = ReaderStream::new(res.stdout);
+    let stream_body = StreamBody::new(reader_stream.map_ok(body::Frame::data));
+    let boxed_body = stream_body.boxed();
+
+    let mut builder = Response::builder();
+
+    for (name, value) in res.headers {
+        builder = builder.header(name, value);
     }
+
+    builder.status(res.status)
+        //.body(StreamBody::new(self.stdout))
+        .body(boxed_body)
+        .unwrap()
 }

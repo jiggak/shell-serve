@@ -1,5 +1,4 @@
 pub mod route;
-pub mod route_response;
 pub mod router;
 mod router_service;
 
@@ -31,8 +30,5 @@ pub enum Error {
     RouteIoError(#[from] std::io::Error),
 
     #[error("Failed to open route io stream")]
-    RouteIoOpen,
-
-    #[error("Unsupported method")]
-    UnsupportedMethod
+    RouteIoOpen
 }
