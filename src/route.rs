@@ -1,15 +1,14 @@
+use hyper::StatusCode;
 use std::{
     collections::HashMap, io::Read, os::fd::{AsRawFd, OwnedFd},
-    path::{Component, Path}, process::{self, Stdio}, str::FromStr
+    path::{Component, Path, PathBuf}, process::{self, Stdio}, str::FromStr
 };
-use rocket::http::Status;
-use tokio::{io, process::{Child, Command}};
+use tokio::{io, process::{Child, ChildStdout, Command}};
 
-use crate::route_response::RouteResponse;
 use super::Error;
 
 
-#[derive(Debug, Eq, PartialEq)]
+#[derive(Debug, Clone, Eq, PartialEq)]
 pub enum Method {
     Get,
     Put,
@@ -31,7 +30,7 @@ impl FromStr for Method {
     }
 }
 
-#[derive(Debug, Eq, PartialEq)]
+#[derive(Debug, Clone, Eq, PartialEq)]
 enum RoutePart {
     Literal(String),
     Named(String)
@@ -49,7 +48,7 @@ impl FromStr for RoutePart {
     }
 }
 
-#[derive(Debug, Eq, PartialEq)]
+#[derive(Debug, Clone, Eq, PartialEq)]
 enum PathPart {
     Entry(RoutePart),
     CatchAll(String)
@@ -67,7 +66,7 @@ impl FromStr for PathPart {
     }
 }
 
-#[derive(Debug, Eq, PartialEq)]
+#[derive(Debug, Clone, Eq, PartialEq)]
 enum QueryPart {
     KeyValue(String, RoutePart),
     CatchAll(String)
@@ -88,7 +87,7 @@ impl FromStr for QueryPart {
     }
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct Route {
     method: Method,
     path: Vec<PathPart>,
@@ -156,7 +155,7 @@ impl Route {
         Ok(cmd)
     }
 
-    pub fn matches(&self, method: &Method, path: &Path, query: &HashMap<&str, &str>) -> Option<Vec<(&String, String)>> {
+    pub fn matches(&self, method: &Method, path: &Path, query: &HashMap<String, String>) -> Option<Vec<(&String, String)>> {
         if self.method != *method {
             return None;
         }
@@ -208,7 +207,7 @@ impl Route {
                         if let Some(value) = query.remove(route_query_k.as_str()) {
                             match route_query_v {
                                 RoutePart::Literal(v) => {
-                                    if v != value {
+                                    if *v != value {
                                         // literal route query value doesn't match, return no-match
                                         return None;
                                     }
@@ -301,20 +300,32 @@ impl RouteProcess {
             .collect::<Result<Vec<_>, _>>()?;
 
         let status = match headers.iter().find(|(k, _)| k == "Status") {
-            Some((_, status)) => Status::from_code(
+            Some((_, status)) => StatusCode::from_u16(
                 status.parse().map_err(|_| Error::InvalidStatus(status.to_string()))?
-            ).ok_or(Error::InvalidStatus(status.to_string()))?,
+            ).map_err(|_| Error::InvalidStatus(status.to_string()))?,
             None => match status.success() {
-                true => Status::Ok,
-                false => Status::InternalServerError
+                true => StatusCode::OK,
+                false => StatusCode::INTERNAL_SERVER_ERROR
             }
         };
 
         let stdout = self.child.stdout.take()
             .ok_or(Error::RouteIoOpen)?;
 
-        Ok(RouteResponse::new(status, headers, stdout))
+        Ok(RouteResponse { status, headers, stdout })
     }
+}
+
+pub struct RouteRequest {
+    pub method: Method,
+    pub path: PathBuf,
+    pub query: HashMap<String, String>
+}
+
+pub struct RouteResponse {
+    pub status: StatusCode,
+    pub headers: Vec<(String, String)>,
+    pub stdout: ChildStdout
 }
 
 fn parse_header(line: &str) -> Result<(String, String), Error> {
@@ -378,7 +389,7 @@ mod tests {
         assert!(route.is_ok());
         let route = route.unwrap();
 
-        let query = HashMap::from([("foo", "bar")]);
+        let query = HashMap::from([("foo".into(), "bar".into())]);
 
         assert_eq!(
             route.matches(&Method::Get, Path::new("/foo/bar/foo.txt"), &query),
@@ -389,7 +400,7 @@ mod tests {
             ])
         );
 
-        let query = HashMap::from([("foo", "bar"), ("baz", "foo")]);
+        let query = HashMap::from([("foo".into(), "bar".into()), ("baz".into(), "foo".into())]);
 
         assert_eq!(
             route.matches(&Method::Get, Path::new("/foo/bar/foo.txt"), &query),
@@ -400,7 +411,7 @@ mod tests {
             ])
         );
 
-        let query = HashMap::from([("baz", "foo")]);
+        let query = HashMap::from([("baz".into(), "foo".into())]);
 
         assert_eq!(
             route.matches(&Method::Get, Path::new("/foo/bar/foo.txt"), &query),

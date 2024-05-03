@@ -1,6 +1,7 @@
-use std::{collections::HashMap, path::Path};
-use crate::route::{Method, Route, RouteProcess};
+use crate::route::{Route, RouteProcess, RouteRequest};
 
+
+#[derive(Clone)]
 pub struct ShellRouter {
     routes: Vec<Route>
 }
@@ -10,9 +11,9 @@ impl ShellRouter {
         Self { routes }
     }
 
-    pub fn execute(&self, method: &Method, path: &Path, query: &HashMap<&str, &str>) -> Result<RouteProcess, RouterError> {
+    pub fn execute(&self, req: &RouteRequest) -> Result<RouteProcess, RouterError> {
         let match_result = self.routes.iter().find_map(|r| {
-            r.matches(method, path, query)
+            r.matches(&req.method, &req.path, &req.query)
                 .map(|m| (r, m))
         });
 
@@ -30,4 +31,6 @@ pub enum RouterError {
     RouteNotFound,
     #[error("Route command failed to spawn")]
     RouteSpawnFailed(#[from] crate::Error),
+    #[error("Unsupported method '{0}'")]
+    UnsupportedMethod(String)
 }
