@@ -167,18 +167,13 @@ impl Route {
             path
         };
 
-        let mut iter_path = path.components();
+        let mut iter_path = path.components().peekable();
         let mut iter_route_path = self.path.iter();
 
         let mut params = vec![];
 
         while let (Some(p), Some(r)) = (iter_path.next(), iter_route_path.next()) {
-            let p = match p {
-                Component::Normal(v) => v,
-                _ => panic!("Unexpected path component variant")
-            };
-
-            let p = p.to_str().unwrap().to_string();
+            let p = path_coponent_string(p);
 
             match r {
                 PathPart::Entry(RoutePart::Literal(v)) => {
@@ -191,8 +186,16 @@ impl Route {
                     params.push((n, p))
                 },
                 PathPart::CatchAll(n) => {
-                    let path = Path::new(&p).join(iter_path.as_path());
-                    params.push((n, path.to_str().unwrap().to_string()))
+                    let remaining_path = if iter_path.peek().is_some() {
+                        let mut remaining = vec![p];
+                        while let Some(next) = iter_path.next() {
+                            remaining.push(path_coponent_string(next));
+                        }
+                        remaining.join("/")
+                    } else {
+                        p
+                    };
+                    params.push((n, remaining_path))
                 }
             }
         }
@@ -259,6 +262,13 @@ impl Route {
 
         Ok(RouteProcess::new(child, read_pipe, write_pipe_fd))
     }
+}
+
+fn path_coponent_string(c: Component) -> String {
+    match c {
+        Component::Normal(v) => v,
+        _ => panic!("Unexpected path component variant")
+    }.to_str().unwrap().to_string()
 }
 
 pub struct RouteProcess {
@@ -430,6 +440,23 @@ mod tests {
         assert_eq!(
             route.matches(&Method::Get, Path::new("/foo/bar/foo.txt"), &query),
             Some(vec![(&String::from("path"), String::from("foo/bar/foo.txt"))])
+        );
+    }
+
+    #[test]
+    fn test_route_match_short_path() {
+        let route = Route::from_str("GET:/{path..}?{query..} handler.sh ${path} ${query}");
+        assert!(route.is_ok());
+        let route = route.unwrap();
+
+        let query = HashMap::new();
+
+        assert_eq!(
+            route.matches(&Method::Get, Path::new("/foo"), &query),
+            Some(vec![
+                (&String::from("path"), String::from("foo")),
+                (&String::from("query"), String::from(""))
+            ])
         );
     }
 }
