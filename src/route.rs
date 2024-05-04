@@ -310,9 +310,11 @@ impl RouteProcess {
             .collect::<Result<Vec<_>, _>>()?;
 
         let status = match headers.iter().find(|(k, _)| k == "Status") {
+            // use status header read from pipe
             Some((_, status)) => StatusCode::from_u16(
                 status.parse().map_err(|_| Error::InvalidStatus(status.to_string()))?
             ).map_err(|_| Error::InvalidStatus(status.to_string()))?,
+            // or derive status from process exit code
             None => match status.success() {
                 true => StatusCode::OK,
                 false => StatusCode::INTERNAL_SERVER_ERROR

@@ -1,4 +1,8 @@
 ```bash
+shell-serve \
+   'GET:/{path..}?{query..} ./foo.sh ${path} ${query}' \
+   'PUT:/{path..} cat'
+
 shell-serve
    --route 'GET:/foo/{file}?foo={bar} handler_get_foo.sh ${file} ${foo}' \
    --route 'GET:/{path..}?{query..} handler_get.sh ${path} ${query}' \
@@ -10,7 +14,7 @@ shell-serve
 
 ```bash
 curl -i http://localhost:8000/foo/baz.txt
-curl -i http://localhost:8000/foo/baz.txt --upload-file hello.txt
+curl -i http://localhost:8000/echo --upload-file hello.txt
 ```
 
 GET
