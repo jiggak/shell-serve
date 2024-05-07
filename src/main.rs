@@ -9,8 +9,12 @@ use tokio::net::TcpListener;
 
 
 #[tokio::main]
-pub async fn main() -> std::io::Result<()> {
-    let cli = Cli::parse();
+pub async fn main() -> anyhow::Result<()> {
+    let mut cli = Cli::parse();
+
+    if let Some(file_path) = cli.file.clone() {
+        cli = cli.load_config(file_path)?;
+    }
 
     let addr = SocketAddr::new(cli.listen, cli.port);
 
