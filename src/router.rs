@@ -13,8 +13,7 @@ impl ShellRouter {
 
     pub fn execute(&self, req: &RouteRequest) -> Result<RouteProcess, RouterError> {
         let match_result = self.routes.iter().find_map(|r| {
-            r.matches(&req.method, &req.path, &req.query)
-                .map(|m| (r, m))
+            r.matches(&req).map(|m| (r, m))
         });
 
         if let Some((route, params)) = match_result {

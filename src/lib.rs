@@ -8,9 +8,6 @@ pub enum Error {
     #[error("Invalid method '{0}'")]
     InvalidMethod(String),
 
-    #[error("Invalid path part '{0}'")]
-    InvalidPathPart(String),
-
     #[error("Invalid route: {0}")]
     InvalidRoute(String),
 

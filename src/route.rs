@@ -1,7 +1,8 @@
 use hyper::StatusCode;
+use urlparse::urlparse;
 use std::{
     collections::HashMap, io::Read, os::fd::{AsRawFd, OwnedFd},
-    path::{Component, Path, PathBuf}, process::{self, Stdio}, str::FromStr
+    path::{Component, PathBuf}, process::{self, Stdio}, str::FromStr
 };
 use tokio::{io, process::{Child, ChildStdout, Command}};
 
@@ -105,23 +106,24 @@ impl FromStr for Route {
         let (path, handler) = path.split_once(' ')
             .ok_or(Error::InvalidRoute("missing handler separator (space)".to_string()))?;
 
-        let path_parts = path.split_once('?');
-        let (path, query) = if let Some((path, query)) = path_parts {
-            let query: Result<Vec<_>, Error> = query.split('&')
-                .into_iter()
-                .map(|s| QueryPart::from_str(s))
-                .collect();
+        let path_uri = urlparse::urlparse(path);
 
-            (path, Some(query?))
-        } else {
-            (path, None)
-        };
-
-        let path: Result<Vec<_>, Error> = path.split('/')
+        let path = path_uri.path.split('/')
             .into_iter()
             .filter(|s| !s.is_empty())
             .map(|s| PathPart::from_str(s))
-            .collect();
+            .collect::<Result<Vec<_>, _>>();
+
+        let query = if let Some(query) = path_uri.query {
+            let query = query.split('&')
+                .into_iter()
+                .map(|s| QueryPart::from_str(s))
+                .collect::<Result<Vec<_>, _>>();
+
+            Some(query?)
+        } else {
+            None
+        };
 
         Ok(Route {
             method: Method::from_str(method)?,
@@ -155,16 +157,16 @@ impl Route {
         Ok(cmd)
     }
 
-    pub fn matches(&self, method: &Method, path: &Path, query: &HashMap<String, String>) -> Option<Vec<(&String, String)>> {
-        if self.method != *method {
+    pub fn matches(&self, req: &RouteRequest) -> Option<Vec<(&String, String)>> {
+        if self.method != req.method {
             return None;
         }
 
         // strip / prefix to match
-        let path = if path.is_absolute() {
-            path.strip_prefix("/").unwrap()
+        let path = if req.path.is_absolute() {
+            req.path.strip_prefix("/").unwrap()
         } else {
-            path
+            req.path.as_ref()
         };
 
         let mut iter_path = path.components().peekable();
@@ -202,7 +204,7 @@ impl Route {
 
         if let Some(route_query) = &self.query {
             // clone query so we can remove matched entries, to get remainder for catch-all
-            let mut query = query.clone();
+            let mut query = req.query.clone();
 
             for entry in route_query {
                 match entry {
@@ -334,6 +336,30 @@ pub struct RouteRequest {
     pub query: HashMap<String, String>
 }
 
+impl FromStr for RouteRequest {
+    type Err = Error;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        let (method, path) = s.split_once(':')
+            .ok_or(Error::InvalidRoute("missing method separator (:)".to_string()))?;
+
+        let path_uri = urlparse(path);
+        let query = if let Some(query) = path_uri.get_parsed_query() {
+            query.into_iter()
+                .map(|(key, val)| (key, val.join(",")))
+                .collect()
+        } else {
+            HashMap::new()
+        };
+
+        Ok(RouteRequest {
+            method: Method::from_str(method)?,
+            path: PathBuf::from(path_uri.path),
+            query
+        })
+    }
+}
+
 pub struct RouteResponse {
     pub status: StatusCode,
     pub headers: Vec<(String, String)>,
@@ -375,22 +401,20 @@ mod tests {
         assert!(route.is_ok());
         let route = route.unwrap();
 
-        let query = HashMap::new();
-
         assert_eq!(
-            route.matches(&Method::Get, Path::new("/foo/foo.txt"), &query),
+            route.matches(&"GET:/foo/foo.txt".parse().unwrap()),
             Some(vec![(&String::from("file"), String::from("foo.txt"))])
         );
         assert_eq!(
-            route.matches(&Method::Get, Path::new("/bar/baz/foo.txt"), &query),
+            route.matches(&"GET:/bar/baz/foo.txt".parse().unwrap()),
             None
         );
         assert_eq!(
-            route.matches(&Method::Get, Path::new("/bar/foo.txt"), &query),
+            route.matches(&"GET:/bar/foo.txt".parse().unwrap()),
             None
         );
         assert_eq!(
-            route.matches(&Method::Put, Path::new("/foo/foo.txt"), &query),
+            route.matches(&"PUT:/foo/foo.txt".parse().unwrap()),
             None
         );
     }
@@ -401,10 +425,8 @@ mod tests {
         assert!(route.is_ok());
         let route = route.unwrap();
 
-        let query = HashMap::from([("foo".into(), "bar".into())]);
-
         assert_eq!(
-            route.matches(&Method::Get, Path::new("/foo/bar/foo.txt"), &query),
+            route.matches(&"GET:/foo/bar/foo.txt?foo=bar".parse().unwrap()),
             Some(vec![
                 (&String::from("path"), String::from("foo/bar/foo.txt")),
                 (&String::from("foo"), String::from("bar")),
@@ -412,10 +434,8 @@ mod tests {
             ])
         );
 
-        let query = HashMap::from([("foo".into(), "bar".into()), ("baz".into(), "foo".into())]);
-
         assert_eq!(
-            route.matches(&Method::Get, Path::new("/foo/bar/foo.txt"), &query),
+            route.matches(&"GET:/foo/bar/foo.txt?foo=bar&baz=foo".parse().unwrap()),
             Some(vec![
                 (&String::from("path"), String::from("foo/bar/foo.txt")),
                 (&String::from("foo"), String::from("bar")),
@@ -423,10 +443,8 @@ mod tests {
             ])
         );
 
-        let query = HashMap::from([("baz".into(), "foo".into())]);
-
         assert_eq!(
-            route.matches(&Method::Get, Path::new("/foo/bar/foo.txt"), &query),
+            route.matches(&RouteRequest::from_str("GET:/foo/bar/foo.txt?baz=foo").unwrap()),
             None
         );
     }
@@ -437,10 +455,8 @@ mod tests {
         assert!(route.is_ok());
         let route = route.unwrap();
 
-        let query = HashMap::new();
-
         assert_eq!(
-            route.matches(&Method::Get, Path::new("/foo/bar/foo.txt"), &query),
+            route.matches(&"GET:/foo/bar/foo.txt".parse().unwrap()),
             Some(vec![(&String::from("path"), String::from("foo/bar/foo.txt"))])
         );
     }
@@ -451,10 +467,9 @@ mod tests {
         assert!(route.is_ok());
         let route = route.unwrap();
 
-        let query = HashMap::new();
-
         assert_eq!(
-            route.matches(&Method::Get, Path::new("/foo"), &query),
+            // route.matches(&RouteRequest::from_str("GET:/foo").unwrap()),
+            route.matches(&"GET:/foo".parse().unwrap()),
             Some(vec![
                 (&String::from("path"), String::from("foo")),
                 (&String::from("query"), String::from(""))
