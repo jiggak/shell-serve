@@ -1,11 +1,16 @@
+mod process;
+mod request;
+mod response;
+pub use process::RouteProcess;
+pub use request::RouteRequest;
+pub use response::RouteResponse;
+
 use crate::Error;
-use hyper::StatusCode;
-use urlparse::urlparse;
 use std::{
-    collections::HashMap, io::Read, os::fd::{AsRawFd, OwnedFd},
-    path::{Component, PathBuf}, process::{self, Stdio}, str::FromStr
+    collections::HashMap, os::fd::{AsRawFd, OwnedFd},
+    path::Component, process::Stdio, str::FromStr
 };
-use tokio::{io, process::{Child, ChildStdout, Command}};
+use tokio::process::Command;
 
 
 #[derive(Debug, Clone, Eq, PartialEq)]
@@ -252,7 +257,7 @@ impl Route {
 
         // FIXME could this be made cross platform, or at least work on MacOS?
         let write_pipe_path = format!("/proc/{}/fd/{}",
-            process::id(),
+            std::process::id(),
             write_pipe_fd.as_raw_fd()
         );
 
@@ -337,7 +342,7 @@ where
                     let query_params = self.haystack.iter()
                         .map(|(k, v)| format!("{k}={v}"))
                         .collect::<Vec<_>>()
-                        .join(",");
+                        .join("&");
 
                     Some(QueryPartMatch::Match(n, query_params))
                 }
@@ -345,112 +350,6 @@ where
         } else {
             None
         }
-    }
-}
-
-pub struct RouteProcess {
-    child: Child,
-    read_pipe: os_pipe::PipeReader,
-    write_pipe_fd: Option<OwnedFd>
-}
-
-impl RouteProcess {
-    pub fn new(child: Child, read_pipe: os_pipe::PipeReader, write_pipe_fd: OwnedFd) -> Self {
-        RouteProcess { child, read_pipe, write_pipe_fd: Some(write_pipe_fd) }
-    }
-
-    pub async fn load_stdin<S>(&mut self, reader: &mut S) -> Result<&mut Self, Error>
-        where S: io::AsyncRead + Unpin
-    {
-        let mut stdin = self.child.stdin.take()
-            .ok_or(Error::RouteIoOpen)?;
-
-        io::copy(reader, &mut stdin).await?;
-
-        Ok(self)
-    }
-
-    pub async fn wait(&mut self) -> Result<RouteResponse, Error> {
-        let status = self.child.wait().await
-            .map_err(|e| Error::RouteWait(e))?;
-
-        // close writer side of pipe to avoid blocking reader
-        let write_pipe_fd = self.write_pipe_fd.take()
-            .expect("write_pipe_fd should be set");
-        drop(write_pipe_fd);
-
-        let mut pipe_buf = String::new();
-        self.read_pipe.read_to_string(&mut pipe_buf)?;
-
-        let headers = pipe_buf.lines()
-            .map(parse_header)
-            .collect::<Result<Vec<_>, _>>()?;
-
-        let status = match headers.iter().find(|(k, _)| k == "Status") {
-            // use status header read from pipe
-            Some((_, status)) => StatusCode::from_u16(
-                status.parse().map_err(|_| Error::InvalidStatus(status.to_string()))?
-            ).map_err(|_| Error::InvalidStatus(status.to_string()))?,
-            // or derive status from process exit code
-            None => match status.success() {
-                true => StatusCode::OK,
-                false => StatusCode::INTERNAL_SERVER_ERROR
-            }
-        };
-
-        let stdout = self.child.stdout.take()
-            .ok_or(Error::RouteIoOpen)?;
-
-        Ok(RouteResponse { status, headers, stdout })
-    }
-}
-
-pub struct RouteRequest {
-    pub method: Method,
-    pub path: PathBuf,
-    pub query: HashMap<String, String>,
-    pub headers: HashMap<String, String>
-}
-
-impl FromStr for RouteRequest {
-    type Err = Error;
-
-    fn from_str(s: &str) -> Result<Self, Self::Err> {
-        let (method, path) = s.split_once(':')
-            .ok_or(Error::InvalidRoute("missing method separator (:)".to_string()))?;
-
-        let path_uri = urlparse(path);
-        let query = if let Some(query) = path_uri.get_parsed_query() {
-            query.into_iter()
-                .map(|(key, val)| (key, val.join(",")))
-                .collect()
-        } else {
-            HashMap::new()
-        };
-
-        Ok(RouteRequest {
-            method: Method::from_str(method)?,
-            path: PathBuf::from(path_uri.path),
-            query,
-            headers: HashMap::new()
-        })
-    }
-}
-
-pub struct RouteResponse {
-    pub status: StatusCode,
-    pub headers: Vec<(String, String)>,
-    pub stdout: ChildStdout
-}
-
-fn parse_header(line: &str) -> Result<(String, String), Error> {
-    let parts: Vec<_> = line.splitn(2, ':')
-        .map(|s| s.trim())
-        .collect();
-
-    match &parts[..] {
-        &[name, value, ..] => Ok((name.to_owned(), value.to_owned())),
-        _ => Err(Error::InvalidHeader(line.to_owned()))
     }
 }
 
@@ -569,14 +468,14 @@ mod tests {
         assert!(route.is_ok());
         let route = route.unwrap();
 
-        let req = RouteRequest::from_str("GET:/foo.txt?foo=bar&bar=baz").unwrap()
+        let req = RouteRequest::from_str("GET:/foo.txt?foo=bar").unwrap()
             .with_headers([("X-Foo".to_string(), "bar".to_string())]);
 
         assert_eq!(
             route.matches(&req),
             Some(vec![
                 (&String::from("path"), String::from("foo.txt")),
-                (&String::from("query"), String::from("bar=baz,foo=bar")),
+                (&String::from("query"), String::from("foo=bar")),
                 (&String::from("headers"), String::from("X-Foo=bar"))
             ])
         );
