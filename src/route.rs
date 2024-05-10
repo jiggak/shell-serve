@@ -1,3 +1,4 @@
+use crate::Error;
 use hyper::StatusCode;
 use urlparse::urlparse;
 use std::{
@@ -5,8 +6,6 @@ use std::{
     path::{Component, PathBuf}, process::{self, Stdio}, str::FromStr
 };
 use tokio::{io, process::{Child, ChildStdout, Command}};
-
-use super::Error;
 
 
 #[derive(Debug, Clone, Eq, PartialEq)]
@@ -93,6 +92,7 @@ pub struct Route {
     method: Method,
     path: Vec<PathPart>,
     query: Option<Vec<QueryPart>>,
+    headers: Option<Vec<QueryPart>>,
     handler: String
 }
 
@@ -125,10 +125,22 @@ impl FromStr for Route {
             None
         };
 
+        let headers = if let Some(fragment) = path_uri.fragment {
+            let headers = fragment.split('&')
+                .into_iter()
+                .map(|s| QueryPart::from_str(s))
+                .collect::<Result<Vec<_>, _>>();
+
+            Some(headers?)
+        } else {
+            None
+        };
+
         Ok(Route {
             method: Method::from_str(method)?,
             path: path?,
             query,
+            headers,
             handler: handler.to_string()
         })
     }
@@ -158,6 +170,13 @@ impl Route {
     }
 
     pub fn matches(&self, req: &RouteRequest) -> Option<Vec<(&String, String)>> {
+        fn path_coponent_string(c: Component) -> String {
+            match c {
+                Component::Normal(v) => v,
+                _ => panic!("Unexpected path component variant")
+            }.to_str().unwrap().to_string()
+        }
+
         if self.method != req.method {
             return None;
         }
@@ -203,38 +222,22 @@ impl Route {
         }
 
         if let Some(route_query) = &self.query {
-            // clone query so we can remove matched entries, to get remainder for catch-all
-            let mut query = req.query.clone();
+            let result = QueryMatchIterator::new(route_query.iter(), &req.query)
+                .matches();
+            if let Some(matches) = result {
+                params.extend(matches);
+            } else {
+                return None;
+            }
+        }
 
-            for entry in route_query {
-                match entry {
-                    QueryPart::KeyValue(route_query_k, route_query_v) => {
-                        if let Some(value) = query.remove(route_query_k.as_str()) {
-                            match route_query_v {
-                                RoutePart::Literal(v) => {
-                                    if *v != value {
-                                        // literal route query value doesn't match, return no-match
-                                        return None;
-                                    }
-                                },
-                                RoutePart::Named(n) => {
-                                    params.push((&n, value.to_string()))
-                                }
-                            }
-                        } else {
-                            // key not found in query, return no-match
-                            return None;
-                        }
-                    },
-                    QueryPart::CatchAll(n) => {
-                        let query_params = query.iter()
-                            .map(|(k, v)| format!("{k}={v}"))
-                            .collect::<Vec<_>>()
-                            .join(",");
-
-                        params.push((n, query_params))
-                    }
-                }
+        if let Some(route_headers) = &self.headers {
+            let result = QueryMatchIterator::new(route_headers.iter(), &req.headers)
+                .matches();
+            if let Some(matches) = result {
+                params.extend(matches);
+            } else {
+                return None;
             }
         }
 
@@ -266,11 +269,83 @@ impl Route {
     }
 }
 
-fn path_coponent_string(c: Component) -> String {
-    match c {
-        Component::Normal(v) => v,
-        _ => panic!("Unexpected path component variant")
-    }.to_str().unwrap().to_string()
+struct QueryMatchIterator<I> {
+    iter: I,
+    haystack: HashMap<String, String>
+}
+
+enum QueryPartMatch<'a> {
+    Match(&'a String, String),
+    MatchLiteral,
+    NoMatch
+}
+
+impl<'a, I> QueryMatchIterator<I>
+where
+    I: Iterator<Item = &'a QueryPart>
+{
+    fn new(iter: I, haystack: &HashMap<String, String>) -> Self {
+        // clone so we can remove matched entries, to get remainder for catch-all
+        QueryMatchIterator { iter, haystack: haystack.clone() }
+    }
+
+    fn matches(&mut self) -> Option<Vec<(&'a String, String)>> {
+        let mut matches = vec![];
+
+        while let Some(x) = self.next() {
+            match x {
+                QueryPartMatch::Match(k, v) => matches.push((k, v)),
+                QueryPartMatch::MatchLiteral => (),
+                QueryPartMatch::NoMatch => return None
+            }
+        }
+
+        return Some(matches);
+    }
+}
+
+impl<'a, I> Iterator for QueryMatchIterator<I>
+where
+    I: Iterator<Item = &'a QueryPart>
+{
+    type Item = QueryPartMatch<'a>;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        if let Some(entry) = self.iter.next() {
+            match entry {
+                QueryPart::KeyValue(entry_k, entry_v) => {
+                    if let Some(value) = self.haystack.remove(entry_k.as_str()) {
+                        match entry_v {
+                            RoutePart::Literal(v) => {
+                                if *v != value {
+                                    // literal route query value doesn't match, return no-match
+                                    Some(QueryPartMatch::NoMatch)
+                                } else {
+                                    Some(QueryPartMatch::MatchLiteral)
+                                }
+                            },
+                            RoutePart::Named(n) => {
+                                Some(QueryPartMatch::Match(n, value.to_string()))
+                            }
+                        }
+                    } else {
+                        // key not found in query, return no-match
+                        Some(QueryPartMatch::NoMatch)
+                    }
+                },
+                QueryPart::CatchAll(n) => {
+                    let query_params = self.haystack.iter()
+                        .map(|(k, v)| format!("{k}={v}"))
+                        .collect::<Vec<_>>()
+                        .join(",");
+
+                    Some(QueryPartMatch::Match(n, query_params))
+                }
+            }
+        } else {
+            None
+        }
+    }
 }
 
 pub struct RouteProcess {
@@ -333,7 +408,8 @@ impl RouteProcess {
 pub struct RouteRequest {
     pub method: Method,
     pub path: PathBuf,
-    pub query: HashMap<String, String>
+    pub query: HashMap<String, String>,
+    pub headers: HashMap<String, String>
 }
 
 impl FromStr for RouteRequest {
@@ -355,7 +431,8 @@ impl FromStr for RouteRequest {
         Ok(RouteRequest {
             method: Method::from_str(method)?,
             path: PathBuf::from(path_uri.path),
-            query
+            query,
+            headers: HashMap::new()
         })
     }
 }
@@ -380,6 +457,15 @@ fn parse_header(line: &str) -> Result<(String, String), Error> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    impl RouteRequest {
+        fn with_headers<H>(mut self, headers: H) -> Self
+            where H: Into<HashMap<String, String>>
+        {
+            self.headers = headers.into();
+            self
+        }
+    }
 
     #[test]
     fn test_route_parse() {
@@ -473,6 +559,25 @@ mod tests {
             Some(vec![
                 (&String::from("path"), String::from("foo")),
                 (&String::from("query"), String::from(""))
+            ])
+        );
+    }
+
+    #[test]
+    fn test_route_match_headers() {
+        let route = Route::from_str("GET:/{path..}?{query..}#{headers..} handler.sh ${path} ${query} ${headers}");
+        assert!(route.is_ok());
+        let route = route.unwrap();
+
+        let req = RouteRequest::from_str("GET:/foo.txt?foo=bar&bar=baz").unwrap()
+            .with_headers([("X-Foo".to_string(), "bar".to_string())]);
+
+        assert_eq!(
+            route.matches(&req),
+            Some(vec![
+                (&String::from("path"), String::from("foo.txt")),
+                (&String::from("query"), String::from("bar=baz,foo=bar")),
+                (&String::from("headers"), String::from("X-Foo=bar"))
             ])
         );
     }

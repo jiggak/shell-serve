@@ -82,7 +82,11 @@ fn to_route_req(req: &Request<body::Incoming>) -> Result<RouteRequest, RouterErr
         HashMap::new()
     };
 
-    Ok(RouteRequest { method, path, query })
+    let headers = req.headers().into_iter()
+        .map(|(k, v)| (k.to_string(), v.to_str().unwrap().to_string()))
+        .collect();
+
+    Ok(RouteRequest { method, path, query, headers })
 }
 
 fn route_response(res: RouteResponse) -> Response<BoxBody<body::Bytes, IoError>> {

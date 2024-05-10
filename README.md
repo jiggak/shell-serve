@@ -5,6 +5,7 @@ shell-serve \
 
 shell-serve --listen 127.0.0.1 --port 8080 \
    'GET:/foo/{file}?foo={bar} handle_get_foo.sh ${file} ${foo}' \
+   'GET:/poo/{file}#x-auth-token={token} handle_get_poo.sh ${file} ${token}' \
    'GET:/{path..}?{query..} handle_get.sh ${path} ${query}' \
    'PUT:/{path..} handle_write.sh ${path}' \
    'DELETE:/{path..} rm some_dir/${path}'
