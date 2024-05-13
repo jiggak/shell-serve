@@ -7,8 +7,8 @@ pub use response::RouteResponse;
 
 use crate::Error;
 use std::{
-    collections::HashMap, os::fd::{AsRawFd, OwnedFd},
-    path::Component, process::Stdio, str::FromStr
+    collections::{HashMap, VecDeque}, os::fd::{AsRawFd, OwnedFd},
+    path::{Component, Path}, process::Stdio, str::FromStr
 };
 use tokio::process::Command;
 
@@ -38,7 +38,8 @@ impl FromStr for Method {
 #[derive(Debug, Clone, Eq, PartialEq)]
 enum RoutePart {
     Literal(String),
-    Named(String)
+    Named(String),
+    NamedOptional(String)
 }
 
 impl FromStr for RoutePart {
@@ -46,7 +47,11 @@ impl FromStr for RoutePart {
 
     fn from_str(s: &str) -> Result<Self, Self::Err> {
         if s.starts_with('{') {
-            Ok(Self::Named(s[1..s.len()-1].to_string()))
+            if s.ends_with("*}") {
+                Ok(Self::NamedOptional(s[1..s.len()-2].to_string()))
+            } else {
+                Ok(Self::Named(s[1..s.len()-1].to_string()))
+            }
         } else {
             Ok(Self::Literal(s.to_string()))
         }
@@ -175,13 +180,6 @@ impl Route {
     }
 
     pub fn matches(&self, req: &RouteRequest) -> Option<Vec<(&String, String)>> {
-        fn path_coponent_string(c: Component) -> String {
-            match c {
-                Component::Normal(v) => v,
-                _ => panic!("Unexpected path component variant")
-            }.to_str().unwrap().to_string()
-        }
-
         if self.method != req.method {
             return None;
         }
@@ -193,37 +191,14 @@ impl Route {
             req.path.as_ref()
         };
 
-        let mut iter_path = path.components().peekable();
-        let mut iter_route_path = self.path.iter();
-
         let mut params = vec![];
 
-        while let (Some(p), Some(r)) = (iter_path.next(), iter_route_path.next()) {
-            let p = path_coponent_string(p);
-
-            match r {
-                PathPart::Entry(RoutePart::Literal(v)) => {
-                    if v != &p {
-                        // literal route component doesn't match, return no-match
-                        return None;
-                    }
-                },
-                PathPart::Entry(RoutePart::Named(n)) => {
-                    params.push((n, p))
-                },
-                PathPart::CatchAll(n) => {
-                    let remaining_path = if iter_path.peek().is_some() {
-                        let mut remaining = vec![p];
-                        while let Some(next) = iter_path.next() {
-                            remaining.push(path_coponent_string(next));
-                        }
-                        remaining.join("/")
-                    } else {
-                        p
-                    };
-                    params.push((n, remaining_path))
-                }
-            }
+        let result = PathMatchIterator::new(self.path.iter(), path)
+            .matches();
+        if let Some(matches) = result {
+            params.extend(matches);
+        } else {
+            return None;
         }
 
         if let Some(route_query) = &self.query {
@@ -274,15 +249,15 @@ impl Route {
     }
 }
 
-struct QueryMatchIterator<I> {
-    iter: I,
-    haystack: HashMap<String, String>
-}
-
-enum QueryPartMatch<'a> {
+enum MatchResult<'a> {
     Match(&'a String, String),
     MatchLiteral,
     NoMatch
+}
+
+struct QueryMatchIterator<I> {
+    iter: I,
+    haystack: HashMap<String, String>
 }
 
 impl<'a, I> QueryMatchIterator<I>
@@ -293,27 +268,13 @@ where
         // clone so we can remove matched entries, to get remainder for catch-all
         QueryMatchIterator { iter, haystack: haystack.clone() }
     }
-
-    fn matches(&mut self) -> Option<Vec<(&'a String, String)>> {
-        let mut matches = vec![];
-
-        while let Some(x) = self.next() {
-            match x {
-                QueryPartMatch::Match(k, v) => matches.push((k, v)),
-                QueryPartMatch::MatchLiteral => (),
-                QueryPartMatch::NoMatch => return None
-            }
-        }
-
-        return Some(matches);
-    }
 }
 
 impl<'a, I> Iterator for QueryMatchIterator<I>
 where
     I: Iterator<Item = &'a QueryPart>
 {
-    type Item = QueryPartMatch<'a>;
+    type Item = MatchResult<'a>;
 
     fn next(&mut self) -> Option<Self::Item> {
         if let Some(entry) = self.iter.next() {
@@ -324,18 +285,25 @@ where
                             RoutePart::Literal(v) => {
                                 if *v != value {
                                     // literal route query value doesn't match, return no-match
-                                    Some(QueryPartMatch::NoMatch)
+                                    Some(MatchResult::NoMatch)
                                 } else {
-                                    Some(QueryPartMatch::MatchLiteral)
+                                    Some(MatchResult::MatchLiteral)
                                 }
                             },
                             RoutePart::Named(n) => {
-                                Some(QueryPartMatch::Match(n, value.to_string()))
+                                Some(MatchResult::Match(n, value.to_string()))
+                            },
+                            RoutePart::NamedOptional(n) => {
+                                Some(MatchResult::Match(n, value.to_string()))
                             }
                         }
-                    } else {
-                        // key not found in query, return no-match
-                        Some(QueryPartMatch::NoMatch)
+                    } else { // key not found in haystack
+                        match entry_v {
+                            RoutePart::NamedOptional(n) => {
+                                Some(MatchResult::Match(n, String::new()))
+                            },
+                            _ => Some(MatchResult::NoMatch)
+                        }
                     }
                 },
                 QueryPart::CatchAll(n) => {
@@ -344,7 +312,7 @@ where
                         .collect::<Vec<_>>()
                         .join("&");
 
-                    Some(QueryPartMatch::Match(n, query_params))
+                    Some(MatchResult::Match(n, query_params))
                 }
             }
         } else {
@@ -352,6 +320,97 @@ where
         }
     }
 }
+
+struct PathMatchIterator<I> {
+    iter: I,
+    haystack: VecDeque<String>
+}
+
+impl<'a, I> PathMatchIterator<I>
+where
+    I: Iterator<Item = &'a PathPart>
+{
+    fn new(iter: I, path: &Path) -> Self {
+        let haystack = path.components()
+            .map(|c| match c {
+                Component::Normal(v) => v.to_str().unwrap().to_string(),
+                _ => panic!("Unexpected path component variant")
+            })
+            .collect();
+        PathMatchIterator { iter, haystack }
+    }
+}
+
+impl<'a, I> Iterator for PathMatchIterator<I>
+where
+    I: Iterator<Item = &'a PathPart>
+{
+    type Item = MatchResult<'a>;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        let path_part = if let Some(path_part) = self.iter.next() {
+            path_part
+        } else {
+            return None;
+        };
+
+        match path_part {
+            PathPart::Entry(entry) => {
+                let path_entry = self.haystack.pop_front();
+                match entry {
+                    RoutePart::Literal(v) => {
+                        if let Some(val) = path_entry {
+                            if v == &val {
+                                Some(MatchResult::MatchLiteral)
+                            } else {
+                                Some(MatchResult::NoMatch)
+                            }
+                        } else {
+                            Some(MatchResult::NoMatch)
+                        }
+                    },
+                    RoutePart::Named(n) => {
+                        if let Some(val) = path_entry {
+                            Some(MatchResult::Match(n, val))
+                        } else {
+                            Some(MatchResult::NoMatch)
+                        }
+                    },
+                    RoutePart::NamedOptional(n) => {
+                        let val = path_entry.unwrap_or(String::new());
+                        Some(MatchResult::Match(n, val))
+                    }
+                }
+            },
+            PathPart::CatchAll(n) => {
+                let remaining: Vec<_> = self.haystack.clone().into();
+                return Some(MatchResult::Match(n, remaining.join("/")));
+            }
+        }
+    }
+}
+
+trait MatchIterator<'a>: Iterator<Item = MatchResult<'a>> {
+    fn matches(&mut self) -> Option<Vec<(&'a String, String)>> {
+        let mut matches = vec![];
+
+        while let Some(x) = self.next() {
+            match x {
+                MatchResult::Match(k, v) => matches.push((k, v)),
+                MatchResult::MatchLiteral => (),
+                MatchResult::NoMatch => return None
+            }
+        }
+
+        return Some(matches);
+    }
+}
+
+impl<'a, I> MatchIterator<'a> for QueryMatchIterator<I>
+where I: Iterator<Item = &'a QueryPart> { }
+
+impl<'a, I> MatchIterator<'a> for PathMatchIterator<I>
+where I: Iterator<Item = &'a PathPart> { }
 
 #[cfg(test)]
 mod tests {
@@ -378,6 +437,20 @@ mod tests {
             PathPart::Entry(RoutePart::Named("file".to_string()))
         ]);
         assert_eq!(route.handler, "handler_get_foo.sh ${file}");
+    }
+
+    #[test]
+    fn test_route_parse_optional() {
+        let route = Route::from_str("GET:/{file*}?bar={foo*} handler.sh ${file} ${foo}");
+        assert!(route.is_ok());
+        let route = route.unwrap();
+
+        assert_eq!(route.path, vec![
+            PathPart::Entry(RoutePart::NamedOptional("file".to_string()))
+        ]);
+        assert_eq!(route.query, Some(vec![
+            QueryPart::KeyValue("bar".to_string(), RoutePart::NamedOptional("foo".to_string()))
+        ]));
     }
 
     #[test]
@@ -477,6 +550,23 @@ mod tests {
                 (&String::from("path"), String::from("foo.txt")),
                 (&String::from("query"), String::from("foo=bar")),
                 (&String::from("headers"), String::from("X-Foo=bar"))
+            ])
+        );
+    }
+
+    #[test]
+    fn test_route_match_optional() {
+        let route = Route::from_str("GET:/{file*}?param={val*} handler.sh ${file} ${val}");
+        assert!(route.is_ok());
+        let route = route.unwrap();
+
+        let req = RouteRequest::from_str("GET:/").unwrap();
+
+        assert_eq!(
+            route.matches(&req),
+            Some(vec![
+                (&String::from("file"), String::from("")),
+                (&String::from("val"), String::from(""))
             ])
         );
     }
