@@ -307,7 +307,7 @@ where
                     }
                 },
                 QueryPart::CatchAll(n) => {
-                    let query_params = self.haystack.iter()
+                    let query_params = self.haystack.drain()
                         .map(|(k, v)| format!("{k}={v}"))
                         .collect::<Vec<_>>()
                         .join("&");
@@ -383,7 +383,7 @@ where
                 }
             },
             PathPart::CatchAll(n) => {
-                let remaining: Vec<_> = self.haystack.clone().into();
+                let remaining: Vec<_> = self.haystack.drain(..).collect();
                 return Some(MatchResult::Match(n, remaining.join("/")));
             }
         }
@@ -402,15 +402,29 @@ trait MatchIterator<'a>: Iterator<Item = MatchResult<'a>> {
             }
         }
 
+        if self.haystack_count() != 0 {
+            return None;
+        }
+
         return Some(matches);
     }
+
+    fn haystack_count(&self) -> usize;
 }
 
 impl<'a, I> MatchIterator<'a> for QueryMatchIterator<I>
-where I: Iterator<Item = &'a QueryPart> { }
+where I: Iterator<Item = &'a QueryPart> {
+    fn haystack_count(&self) -> usize {
+        self.haystack.len()
+    }
+}
 
 impl<'a, I> MatchIterator<'a> for PathMatchIterator<I>
-where I: Iterator<Item = &'a PathPart> { }
+where I: Iterator<Item = &'a PathPart> {
+    fn haystack_count(&self) -> usize {
+        self.haystack.len()
+    }
+}
 
 #[cfg(test)]
 mod tests {
@@ -516,6 +530,23 @@ mod tests {
         assert_eq!(
             route.matches(&"GET:/foo/bar/foo.txt".parse().unwrap()),
             Some(vec![(&String::from("path"), String::from("foo/bar/foo.txt"))])
+        );
+    }
+
+    #[test]
+    fn test_route_match_root() {
+        let route = Route::from_str("GET:/ handler.sh");
+        assert!(route.is_ok());
+        let route = route.unwrap();
+
+        assert_eq!(
+            route.matches(&"GET:/".parse().unwrap()),
+            Some(vec![])
+        );
+
+        assert_eq!(
+            route.matches(&"GET:/file.txt".parse().unwrap()),
+            None
         );
     }
 
