@@ -531,6 +531,11 @@ mod tests {
             route.matches(&"GET:/foo/bar/foo.txt".parse().unwrap()),
             Some(vec![(&String::from("path"), String::from("foo/bar/foo.txt"))])
         );
+
+        assert_eq!(
+            route.matches(&"GET:/".parse().unwrap()),
+            Some(vec![(&String::from("path"), String::from(""))])
+        );
     }
 
     #[test]
